@@ -4,8 +4,13 @@
 int DEBUG = 1;
 int DRY_RUN = 0;
 
+// Will use Macros when Arduino isn't able to initialize global constants in order.
+#define SECONDS_PER_DAY (60 * 60 * 24)
+
+// It seems Arduino isn't able to initialize global constants in order
 const int kMsInSecond = 1000;
-const int kMsInHour = kMsInSecond * 60 * 60;
+const int kSecondsPerDay = 60 * 60 * 24 * 24;
+const int kMinWaterInternal = kSecondsPerDay * 2;
 
 const int kPlantCount = 1;
 
@@ -30,16 +35,34 @@ const int kMoistureThreshold = 450;
 const int kInitialMoisture = 200;
 const int kMaxPumpingSeconds = 5;
 
-// TODO: implement water-saver based on irrigation interval.
-const int kMinWaterInternal = kMsInHour * 24;
 
 // Theoretically, this depends on the plant and sensitivity of the sensor.
 int kMoistureThresholds[kPlantCount] = {0};
 
+enum PumpStates {
+    ON,
+    OFF
+};
+
+class PumpStatus {
+public:
+    int duration_;
+    PumpStates state_;
+
+    bool IsOn() {
+      return state_ == ON;
+    }
+    PumpStatus NextSecond() {
+      return PumpStatus(state_, duration_ + 1);
+    }
+    PumpStatus(PumpStates state, int duration) :
+      state_(state), duration_(duration) {}
+
+    PumpStatus(PumpStates state) : PumpStatus(state, 0) {}
+};
+
 int gLatestReadings[kPlantCount] = {0};
-int gPumpStates[kPlantCount] = {0};
-int gSecondsInState[kPlantCount] = {0};
-int gLastPumpTimeMs = 0;
+PumpStatus gPumpStates[kPlantCount] = { PumpStatus(OFF) };
 
 void PrintDouble(double val, unsigned int precision) {
   Serial.print(int(val));  //prints the int part
@@ -151,8 +174,7 @@ void setup() {
     kMoistureThresholds[i] = kMoistureThreshold;
     gLatestReadings[i] = kInitialMoisture;
     // Turn off the pump initially.
-    gPumpStates[i] = 0;
-    gSecondsInState[i] = 0;
+    gPumpStates[i] = PumpStatus(OFF);
     // Used to track historical moisture readings.
     gMoistureReadings[i] = new RollingArray(60, 0, 1024);
   }
@@ -165,42 +187,49 @@ void setup() {
   delay(kMsInSecond);
 }
 
-void UpdatePumpState(int plant_index, int moisture_level);
+void Update(int plant_index, int moisture_level);
+
+void PrintPumpStatus(PumpStatus status) {
+  char text[40];
+  sprintf(text, "Pump state: %d - Duration: %d seconds", status.state_, status.duration_);
+  Serial.println(text);
+}
 
 // Repeated callback of Arduino.
 void loop() {
   for (int i = 0; i < kPlantCount; i++) {
     int moisture_level = analogRead(kMoistureSensor[i]);
-    UpdatePumpState(i, moisture_level);
+    Update(i, moisture_level);
+    PrintPumpStatus(gPumpStates[i]);
   }
   PrintArray("Moisture readings: ", gLatestReadings, kPlantCount);
-  PrintArray("Pump states        ", gPumpStates, kPlantCount);
-  PrintArray("Seconds in state:  ", gSecondsInState, kPlantCount);
-
   delay(kMsInSecond);
 }
 
-bool ShouldPumpWater(int plantIndex, int prev_state, int new_state) {
-  // OFF/ON -> OFF
-  if (new_state != 1) {
-    digitalWrite(BUILT_IN_LED, kLightOff);
-    return false;
+// Supposed to be called once a second.
+PumpStatus NextStatus(PumpStatus current_status, bool dry_enough) {
+  const int duration = current_status.duration_;
+  switch (current_status.state_) {
+    case OFF:
+      // Moisture-based auto-trigger
+      if (dry_enough && duration >= kSecondsPerDay) {
+        Serial.println("Moisture-based trigger");
+        return PumpStatus(ON, 0);
+      }
+      Serial.println("Remain OFF");
+      return current_status.NextSecond();
+    case ON:
+      if (duration >= kMaxPumpingSeconds) {
+        Serial.println("Saving water");
+        return PumpStatus(OFF, 0);
+      }
+      Serial.println("Remain ON");
+      return current_status.NextSecond();
   }
-  // OFF -> ON
-  if (prev_state != 1) {
-    return true;
-  }
-  // ON -> ON
-  if (gSecondsInState[plantIndex] <= kMaxPumpingSeconds) {
-    return true;
-  }
-  // Turn on warning light
-  digitalWrite(BUILT_IN_LED, kLightOn);
-  return false;
 }
 
 // Supposed to be called once a second.
-void UpdatePumpState(int plant_index, int moisture_level) {
+void Update(int plant_index, int moisture_level) {
   gLatestReadings[plant_index] = moisture_level;
 
   RollingArray *reading_history = gMoistureReadings[plant_index];
@@ -210,19 +239,17 @@ void UpdatePumpState(int plant_index, int moisture_level) {
     reading_history->Report();
   }
   // Only use the pump when the sensor's reading has stabilized.
-  const int use_pump =
+  const bool dry_enough =
     (reading_history->Std() < 10.0) &&
     (reading_history->Avg() >= kMoistureThresholds[plant_index]);
 
-  int prev_state = gPumpStates[plant_index];
-  if (prev_state == use_pump) {
-    gSecondsInState[plant_index] = gSecondsInState[plant_index] + 1;
-  } else {
-    gPumpStates[plant_index] = use_pump;
-    gSecondsInState[plant_index] = 0;
-  }
-  if (ShouldPumpWater(plant_index, prev_state, use_pump) && !DRY_RUN) {
-    const int pump_command = gPumpStates[plant_index] ? kPumpOn : kPumpOff;
+  PumpStatus* status = &gPumpStates[plant_index];
+  *status = NextStatus(*status, dry_enough);
+
+  const int pump_command = status->IsOn() ? kPumpOn : kPumpOff;
+  const int light_command = status->IsOn() ? kLightOn : kLightOff;
+  if (!DRY_RUN) {
+    digitalWrite(BUILT_IN_LED, light_command);
     digitalWrite(kPumpRelay[plant_index], pump_command);
   }
 }
