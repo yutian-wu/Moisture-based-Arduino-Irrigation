@@ -4,13 +4,10 @@
 int DEBUG = 1;
 int DRY_RUN = 0;
 
-// Will use Macros when Arduino isn't able to initialize global constants in order.
-#define SECONDS_PER_DAY (60 * 60 * 24)
-
-// It seems Arduino isn't able to initialize global constants in order
-const int kMsInSecond = 1000;
-const int kSecondsPerDay = 60 * 60 * 24 * 24;
-const int kMinWaterInternal = kSecondsPerDay * 2;
+const long kMsInSecond = 1000L;
+const long kSecondsPerHour = 60L * 60L;
+const long kSecondsPerDay = kSecondsPerHour * 24L;
+const long kMinWaterInternal = kSecondsPerDay * 2L;
 
 const int kPlantCount = 1;
 
@@ -35,7 +32,6 @@ const int kMoistureThreshold = 450;
 const int kInitialMoisture = 200;
 const int kMaxPumpingSeconds = 5;
 
-
 // Theoretically, this depends on the plant and sensitivity of the sensor.
 int kMoistureThresholds[kPlantCount] = {0};
 
@@ -46,7 +42,7 @@ enum PumpStates {
 
 class PumpStatus {
 public:
-    int duration_;
+    long duration_;
     PumpStates state_;
 
     bool IsOn() {
@@ -58,7 +54,7 @@ public:
     PumpStatus(PumpStates state, int duration) :
       state_(state), duration_(duration) {}
 
-    PumpStatus(PumpStates state) : PumpStatus(state, 0) {}
+    PumpStatus(PumpStates state) : PumpStatus(state, 0L) {}
 };
 
 int gLatestReadings[kPlantCount] = {0};
@@ -190,7 +186,7 @@ void setup() {
 void Update(int plant_index, int moisture_level);
 
 void PrintPumpStatus(PumpStatus status) {
-  char text[40];
+  char text[50];
   sprintf(text, "Pump state: %d - Duration: %d seconds", status.state_, status.duration_);
   Serial.println(text);
 }
@@ -211,17 +207,20 @@ PumpStatus NextStatus(PumpStatus current_status, bool dry_enough) {
   const int duration = current_status.duration_;
   switch (current_status.state_) {
     case OFF:
-      // Moisture-based auto-trigger
+      if (duration >= kMinWaterInternal) {
+        Serial.println("Time-based trigger");
+        return PumpStatus(ON);
+      }
       if (dry_enough && duration >= kSecondsPerDay) {
         Serial.println("Moisture-based trigger");
-        return PumpStatus(ON, 0);
+        return PumpStatus(ON);
       }
       Serial.println("Remain OFF");
       return current_status.NextSecond();
     case ON:
       if (duration >= kMaxPumpingSeconds) {
         Serial.println("Saving water");
-        return PumpStatus(OFF, 0);
+        return PumpStatus(OFF);
       }
       Serial.println("Remain ON");
       return current_status.NextSecond();
